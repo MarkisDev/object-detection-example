@@ -15,6 +15,8 @@ void main() async {
 }
 
 late List<CameraDescription> cameras;
+String? labelString;
+String? confidenceString;
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -43,7 +45,6 @@ class _MyHomePageState extends State<MyHomePage> {
   bool isBusy = false;
   dynamic _detectedObjects;
   List<Widget> stackChildren = [];
-
   @override
   void initState() {
     super.initState();
@@ -210,16 +211,36 @@ class _MyHomePageState extends State<MyHomePage> {
     }
     return Scaffold(
       appBar: AppBar(
+        centerTitle: true,
         title: const Text("Object detector"),
-        backgroundColor: Colors.pinkAccent,
+        backgroundColor: Color.fromARGB(255, 126, 0, 252),
       ),
       backgroundColor: Colors.black,
-      body: Container(
-          margin: const EdgeInsets.only(top: 0),
-          color: Colors.black,
-          child: Stack(
-            children: stackChildren,
-          )),
+      body: Column(
+        children: [
+          Expanded(
+            child: Container(
+                margin: const EdgeInsets.only(top: 0),
+                color: Colors.black,
+                child: Stack(
+                  children: stackChildren,
+                )),
+          ),
+          Container(
+              color: Colors.white,
+              height: MediaQuery.of(context).size.width * 0.30,
+              width: MediaQuery.of(context).size.width,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text('Name: $labelString',
+                      style: const TextStyle(fontSize: 21)),
+                  Text('Confidence: $confidenceString',
+                      style: const TextStyle(fontSize: 21))
+                ],
+              )),
+        ],
+      ),
     );
   }
 }
@@ -255,21 +276,8 @@ class ObjectPainter extends CustomPainter {
 
       var list = detectedObject.labels;
       for (Label label in list) {
-        print("${label.text}   ${label.confidence.toStringAsFixed(2)}");
-        TextSpan span = TextSpan(
-            text: label.text,
-            style: const TextStyle(
-                fontSize: 25, color: Color.fromARGB(255, 255, 0, 0)));
-        TextPainter tp = TextPainter(
-            text: span,
-            textAlign: TextAlign.left,
-            textDirection: TextDirection.ltr);
-        tp.layout();
-        tp.paint(
-            canvas,
-            Offset(detectedObject.boundingBox.left * scaleX,
-                detectedObject.boundingBox.top * scaleY));
-        break;
+        labelString = label.text;
+        confidenceString = label.confidence.toStringAsFixed(2);
       }
     }
   }
