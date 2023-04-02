@@ -1,115 +1,282 @@
-import 'package:flutter/material.dart';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart';
 
-void main() {
+import 'package:camera/camera.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:google_mlkit_object_detection/google_mlkit_object_detection.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  cameras = await availableCameras();
+
   runApp(const MyApp());
 }
 
+late List<CameraDescription> cameras;
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
-
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // Try running your application with "flutter run". You'll see the
-        // application has a blue toolbar. Then, without quitting the app, try
-        // changing the primarySwatch below to Colors.green and then invoke
-        // "hot reload" (press "r" in the console where you ran "flutter run",
-        // or simply save your changes to "hot reload" in a Flutter IDE).
-        // Notice that the counter didn't reset back to zero; the application
-        // is not restarted.
-        primarySwatch: Colors.blue,
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
-    );
+        title: 'Flutter Demo',
+        theme: ThemeData(
+          primarySwatch: Colors.blue,
+        ),
+        home: MyHomePage());
   }
 }
 
 class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+  MyHomePage({super.key});
 
   @override
   State<MyHomePage> createState() => _MyHomePageState();
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+  CameraImage? img;
+  dynamic controller;
+  dynamic objectDetector;
+  bool isBusy = false;
+  dynamic _detectedObjects;
+  List<Widget> stackChildren = [];
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+  @override
+  void initState() {
+    super.initState();
+    initModel();
+    initCamera();
+  }
+
+  initModel() async {
+    final modelPath = await _getModel('assets/ml/model.tflite');
+
+    final options = LocalObjectDetectorOptions(
+        modelPath: modelPath,
+        classifyObjects: true,
+        multipleObjects: true,
+        mode: DetectionMode.stream,
+        confidenceThreshold: 0.5);
+    objectDetector = ObjectDetector(options: options);
+  }
+
+  initCamera() async {
+    controller = CameraController(cameras[0], ResolutionPreset.high);
+    await controller.initialize().then((_) async {
+      await startStream();
+      if (!mounted) {
+        return;
+      }
+    }).catchError((Object e) {
+      if (e is CameraException) {
+        switch (e.code) {
+          case 'CameraAccessDenied':
+            print('Camera access denied!');
+            break;
+          default:
+            print('Camera initalization error!');
+            break;
+        }
+      }
     });
+  }
+
+  Future<String> _getModel(String assetPath) async {
+    if (Platform.isAndroid) {
+      return 'flutter_assets/$assetPath';
+    }
+    final path = '${(await getApplicationSupportDirectory()).path}/$assetPath';
+    await Directory(dirname(path)).create(recursive: true);
+    final file = File(path);
+    if (!await file.exists()) {
+      final byteData = await rootBundle.load(assetPath);
+      await file.writeAsBytes(byteData.buffer
+          .asUint8List(byteData.offsetInBytes, byteData.lengthInBytes));
+    }
+    return file.path;
+  }
+
+  startStream() async {
+    await controller.startImageStream((image) async {
+      if (!isBusy) {
+        isBusy = true;
+        img = image;
+        await performDetectionOnFrame();
+      }
+    });
+  }
+
+  performDetectionOnFrame() async {
+    InputImage frameImg = getInputImage();
+    List<DetectedObject> objects = await objectDetector.processImage(frameImg);
+    double zoomLevel = await controller.getMaxZoomLevel();
+    setState(() {
+      _detectedObjects = objects;
+    });
+    isBusy = false;
+  }
+
+  InputImage getInputImage() {
+    final WriteBuffer allBytes = WriteBuffer();
+    for (final Plane plane in img!.planes) {
+      allBytes.putUint8List(plane.bytes);
+    }
+    final bytes = allBytes.done().buffer.asUint8List();
+    final Size imageSize = Size(img!.width.toDouble(), img!.height.toDouble());
+    final camera = cameras[0];
+
+    final planeData = img!.planes.map(
+      (Plane plane) {
+        return InputImagePlaneMetadata(
+          bytesPerRow: plane.bytesPerRow,
+          height: plane.height,
+          width: plane.width,
+        );
+      },
+    ).toList();
+
+    final inputImageData = InputImageData(
+      size: imageSize,
+      imageRotation:
+          InputImageRotationValue.fromRawValue(camera.sensorOrientation)!,
+      inputImageFormat: InputImageFormatValue.fromRawValue(img!.format.raw)!,
+      planeData: planeData,
+    );
+
+    final inputImage =
+        InputImage.fromBytes(bytes: bytes, inputImageData: inputImageData);
+
+    return inputImage;
+  }
+
+  Widget drawRectangleOverObjects() {
+    if (_detectedObjects == null ||
+        controller == null ||
+        !controller.value.isInitialized) {
+      return Container(
+          child: Center(
+        child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: const [
+              Text('Loading...'),
+              CircularProgressIndicator(),
+            ]),
+      ));
+    }
+
+    final Size imageSize = Size(
+      controller.value.previewSize!.height,
+      controller.value.previewSize!.width,
+    );
+    CustomPainter painter = ObjectPainter(imageSize, _detectedObjects);
+    return CustomPaint(
+      painter: painter,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+    Size size = MediaQuery.of(context).size;
+    // ToastContext().init(context);
+    if (controller != null) {
+      // stackChildren.add(Positioned(top: 0.0, left: 0.0, child: Text(text)));
+      stackChildren.add(
+        Positioned(
+          top: 0.0,
+          left: 0.0,
+          width: size.width,
+          height: size.height,
+          child: Container(
+            child: (controller.value.isInitialized)
+                ? AspectRatio(
+                    aspectRatio: controller.value.aspectRatio,
+                    child: CameraPreview(controller),
+                  )
+                : Container(),
+          ),
+        ),
+      );
+      stackChildren.add(
+        Positioned(
+            top: 0.0,
+            left: 0.0,
+            width: size.width,
+            height: size.height,
+            child: drawRectangleOverObjects()),
+      );
+    }
     return Scaffold(
       appBar: AppBar(
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text("Object detector"),
+        backgroundColor: Colors.pinkAccent,
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Invoke "debug painting" (press "p" in the console, choose the
-          // "Toggle Debug Paint" action from the Flutter Inspector in Android
-          // Studio, or the "Toggle Debug Paint" command in Visual Studio Code)
-          // to see the wireframe for each widget.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text(
-              'You have pushed the button this many times:',
-            ),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+      backgroundColor: Colors.black,
+      body: Container(
+          margin: const EdgeInsets.only(top: 0),
+          color: Colors.black,
+          child: Stack(
+            children: stackChildren,
+          )),
     );
+  }
+}
+
+class ObjectPainter extends CustomPainter {
+  ObjectPainter(this.imgSize, this.objects);
+
+  final Size imgSize;
+  final List<DetectedObject> objects;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // Using TouchyCanvas to enable interactivity
+    // Calculating the scale factor to resize the rectangle (newSize/originalSize)
+    final double scaleX = size.width / imgSize.width;
+    final double scaleY = size.height / imgSize.height;
+
+    final Paint paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 10.0
+      ..color = Color.fromARGB(255, 255, 0, 0);
+
+    for (DetectedObject detectedObject in objects) {
+      canvas.drawRect(
+        Rect.fromLTRB(
+          detectedObject.boundingBox.left * scaleX,
+          detectedObject.boundingBox.top * scaleY,
+          detectedObject.boundingBox.right * scaleX,
+          detectedObject.boundingBox.bottom * scaleY,
+        ),
+        paint,
+      );
+
+      var list = detectedObject.labels;
+      for (Label label in list) {
+        print("${label.text}   ${label.confidence.toStringAsFixed(2)}");
+        TextSpan span = TextSpan(
+            text: label.text,
+            style: const TextStyle(
+                fontSize: 25, color: Color.fromARGB(255, 255, 0, 0)));
+        TextPainter tp = TextPainter(
+            text: span,
+            textAlign: TextAlign.left,
+            textDirection: TextDirection.ltr);
+        tp.layout();
+        tp.paint(
+            canvas,
+            Offset(detectedObject.boundingBox.left * scaleX,
+                detectedObject.boundingBox.top * scaleY));
+        break;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(ObjectPainter oldDelegate) {
+    // Repaint if object is moving or new objects detected
+    return oldDelegate.imgSize != imgSize || oldDelegate.objects != objects;
   }
 }
