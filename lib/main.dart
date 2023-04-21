@@ -23,7 +23,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-        title: 'Object Detection Example',
+        title: 'Object Detection',
         theme: ThemeData(
           primarySwatch: Colors.blue,
         ),
